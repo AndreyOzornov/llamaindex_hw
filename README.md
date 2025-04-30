@@ -66,7 +66,7 @@ python3 ingestion.py
 ```
   3. Execute the following command to start the server:  
 ```bash
-python3 app.py
+streamlit run app.py
 ```
   4. Open the following URL in your browser:  
      `http://localhost:8501`
