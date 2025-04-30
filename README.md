@@ -10,11 +10,43 @@ This project ingests a dataset of resumes, indexes them with LlamaIndex and Pine
 - Pinecone account and API key
 - OpenAI API key
 - Kaggle API credentials (for dataset download)
-  - Install required packages:
-  pip install -r requirements.txt
-
+- Required packages (see requirements.txt)
 
 ---
+
+# Project Setup
+
+Follow these steps to set up the project environment and install the required dependencies.
+
+## Setup Virtual Environment
+
+1. Create a new virtual environment using Python3:
+
+```bash
+python3 -m venv myenv
+```
+
+2. Activate the virtual environment:
+
+```bash
+source myenv/bin/activate
+```
+
+## Environment Variables
+
+Set the following environment variables (in a `.env` file):
+- OPENAI_API_KEY=your_openai_api_key
+- PINECONE_API_KEY=your_pinecone_api_key
+
+---
+
+## Installation
+
+1. Install the required packages:
+
+```bash
+pip install -r requirements.txt
+```
 
 ## Dataset Download
 
@@ -24,34 +56,20 @@ To download the dataset programmatically, use the Kaggle API
 
 Make sure you have your Kaggle API credentials configured as per [Kaggle API documentation](https://www.kaggle.com/docs/api).
 
----
-
-## Ingestion Script (`ingestion.py`)
-
-This script:
-
-1. Loads a sample of PDF resumes from the downloaded dataset folder.
-2. Parses each PDF into smaller text chunks (nodes) with metadata.
-3. Embeds each chunk using OpenAI embeddings.
-4. Stores embeddings in Pinecone vector store.
-5. Saves the original chunks and metadata locally in a docstore (`./storage` folder) for retrieval.
-
-**Usage:**
-    python ingest.py
-
-
-Open the URL shown in the terminal (usually http://localhost:8501) to interact with the app.
-
----
-
-## Environment Variables
-
-Set the following environment variables (e.g., in a `.env` file):
-- OPENAI_API_KEY=your_openai_api_key
-- PINECONE_API_KEY=your_pinecone_api_key
-
-
----
+  1. Execute the following command to download dataset:  
+```bash
+python3 download_dataset.py
+```
+  2. Execute the following command to initialize the database and insert the data:  
+```bash
+python3 ingestion.py
+```
+  3. Execute the following command to start the server:  
+```bash
+python3 app.py
+```
+  4. Open the following URL in your browser:  
+     `http://localhost:8501`
 
 ## Notes
 
@@ -68,10 +86,3 @@ Set the following environment variables (e.g., in a `.env` file):
 - [Pinecone Documentation](https://docs.pinecone.io/)
 - [OpenAI API](https://platform.openai.com/docs/)
 - [Kaggle API](https://www.kaggle.com/docs/api)
-
----
-
-Feel free to open issues or contribute!
-
----
-

@@ -8,6 +8,7 @@ from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.pinecone import PineconeVectorStore
+from llama_index.storage.vector_store.pinecone import PineconeVectorStore
 from llama_index.readers.file import UnstructuredReader
 
 from pinecone.grpc import PineconeGRPC
