@@ -1,95 +1,113 @@
 import os
 import random
 from dotenv import load_dotenv
-
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, Settings, StorageContext
 from llama_index.core.node_parser import SimpleNodeParser
 from llama_index.core.storage.docstore import SimpleDocumentStore
+from llama_index.vector_stores.postgres import PGVectorStore
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
-from llama_index.vector_stores.pinecone import PineconeVectorStore
 from llama_index.readers.file import UnstructuredReader
-
-from pinecone.grpc import PineconeGRPC
-from pinecone import ServerlessSpec
 
 load_dotenv()
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+# --- Configuration ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+PERSIST_DIR = "./storage"
+DOCSTORE_FILENAME = "docstore.json"  # default filename used by SimpleDocumentStore
+FOLDER_PATH = "./llamaindex-resumes/data/data/ENGINEERING"
+SAMPLE_SIZE = 25
 
-# Initialize Pinecone client
-pc = PineconeGRPC(api_key=PINECONE_API_KEY)
+# PostgreSQL / pgvector connection params
+PG_PARAMS = dict(
+    host="localhost",
+    port=5432,
+    database="vectordb",
+    user="llama",
+    password="llama_pw",
+    table_name="resume_embeddings",
+    embed_dim=1536,
+)
 
-index_name = "llamaindex-resumes"
-dimension = 1536
 
-# Create Pinecone index if it doesn't exist
-if index_name not in pc.list_indexes().names():
-    pc.create_index(
-        index_name,
-        dimension=dimension,
-        spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+def get_random_pdf_files(folder_path, sample_size=SAMPLE_SIZE):
+    """Return a random sample of PDF file paths from the folder."""
+    if not os.path.exists(folder_path):
+        raise ValueError(f"Directory {folder_path} does not exist")
+
+    pdf_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".pdf")]
+    sample_size = min(sample_size, len(pdf_files))
+    sampled_files = random.sample(pdf_files, sample_size)
+    return [os.path.join(folder_path, f) for f in sampled_files]
+
+
+def main():
+    # Initialize OpenAI embedding and LLM
+    Settings.embed_model = OpenAIEmbedding(
+        model="text-embedding-3-small",
+        api_key=OPENAI_API_KEY,
+    )
+    Settings.llm = OpenAI(
+        model="gpt-3.5-turbo",
+        temperature=0,
+        api_key=OPENAI_API_KEY,
     )
 
-pinecone_index = pc.Index(index_name)
-vector_store = PineconeVectorStore(pinecone_index=pinecone_index)
+    # Initialize PGVector vector store
+    vector_store = PGVectorStore.from_params(**PG_PARAMS)
 
-# Setup OpenAI embedding and LLM
-embed_model = OpenAIEmbedding(model="text-embedding-3-small", api_key=OPENAI_API_KEY)
-llm = OpenAI(model="gpt-3.5-turbo", temperature=0, api_key=OPENAI_API_KEY)
+    # Load or create docstore
+    docstore_path = os.path.join(PERSIST_DIR, DOCSTORE_FILENAME)
+    if os.path.exists(docstore_path):
+        print(f"Loading existing docstore from {docstore_path}")
+        docstore = SimpleDocumentStore.from_persist_path(docstore_path)
+    else:
+        print("Creating new docstore")
+        docstore = SimpleDocumentStore()
 
-Settings.embed_model = embed_model
-Settings.llm = llm
+    # Load documents
+    random_pdfs = get_random_pdf_files(FOLDER_PATH, SAMPLE_SIZE)
+    print(f"Selected {len(random_pdfs)} PDF files for ingestion.")
 
-folder_path = "./llamaindex-resumes/data/data/ENGINEERING"
+    reader = SimpleDirectoryReader(
+        input_files=random_pdfs,
+        file_extractor={".pdf": UnstructuredReader()},
+    )
+    documents = reader.load_data()
+    print(f"Loaded {len(documents)} documents.")
 
-def get_random_pdf_files(folder_path, sample_size=25):
-    all_pdfs = [
-        os.path.join(folder_path, f)
-        for f in os.listdir(folder_path)
-        if f.lower().endswith(".pdf") and os.path.isfile(os.path.join(folder_path, f))
-    ]
-    return random.sample(all_pdfs, sample_size) if len(all_pdfs) > sample_size else all_pdfs
+    # Parse documents into nodes
+    parser = SimpleNodeParser.from_defaults(
+        chunk_size=500,
+        chunk_overlap=20,
+        include_metadata=True,
+    )
+    nodes = parser.get_nodes_from_documents(documents)
+    print(f"Parsed {len(nodes)} nodes from documents.")
 
-random_pdfs = get_random_pdf_files(folder_path, sample_size=25)
+    # Add nodes to docstore (existing + new)
+    docstore.add_documents(nodes)
+    print(f"Docstore now contains {len(docstore.docs)} documents.")
 
-# Load documents with metadata
-reader = SimpleDirectoryReader(
-    input_files=random_pdfs,
-    file_extractor={".pdf": UnstructuredReader()}
-)
-documents = reader.load_data()
+    # Create storage context with vector store and docstore
+    storage_context = StorageContext.from_defaults(
+        vector_store=vector_store,
+        docstore=docstore,
+    )
 
-# Parse documents into nodes with source_file metadata
-parser = SimpleNodeParser.from_defaults(chunk_size=500, chunk_overlap=20)
-nodes = []
-for doc in documents:
-    doc_nodes = parser.get_nodes_from_documents([doc])
-    for node in doc_nodes:
-        node.metadata["source_file"] = os.path.basename(doc.metadata.get("file_path", "unknown"))
-    nodes.extend(doc_nodes)
+    # Build index from nodes and storage context
+    index = VectorStoreIndex(
+        nodes=nodes,
+        storage_context=storage_context,
+        show_progress=True,
+    )
 
-# Embed nodes
-for node in nodes:
-    node.embedding = embed_model.get_text_embedding(node.text)
+    # Persist storage context (saves docstore and metadata locally)
+    storage_context.persist(persist_dir=PERSIST_DIR)
+    print(f"Storage context persisted to {PERSIST_DIR}")
+
+    print(f"Ingested {len(nodes)} chunks from {len(random_pdfs)} PDF files.")
 
 
-# Create a docstore and add nodes
-docstore = SimpleDocumentStore()
-docstore.add_documents(nodes)
-
-# Create storage context with your vector store and docstore
-storage_context = StorageContext.from_defaults(
-    vector_store=vector_store,
-    docstore=docstore
-)
-
-# Build index from nodes and storage context
-index = VectorStoreIndex(nodes=nodes, storage_context=storage_context)
-
-# Persist storage context (saves nodes metadata locally)
-storage_context.persist(persist_dir="./storage")
-
-print(f"Ingested {len(nodes)} chunks from {len(random_pdfs)} PDF files.")
-print(pinecone_index.describe_index_stats())
+if __name__ == "__main__":
+    main()

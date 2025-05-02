@@ -1,11 +1,10 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
-from pinecone import Pinecone
 from llama_index.core import VectorStoreIndex, Settings, StorageContext, load_index_from_storage
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.vector_stores.pinecone import PineconeVectorStore
+from llama_index.vector_stores.postgres import PGVectorStore
 import json
 import re
 
@@ -20,19 +19,24 @@ def get_index() -> VectorStoreIndex:
     Settings.embed_model = OpenAIEmbedding(
         model="text-embedding-3-small",
         embed_batch_size=100,
-        api_key=os.getenv("OPENAI_API_KEY")
+        api_key=os.getenv("OPENAI_API_KEY"),
     )
 
-    # Initialize Pinecone vector store
-    index_name = "llamaindex-resumes"
-    pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
-    pinecone_index = pc.Index(index_name)
-    vector_store = PineconeVectorStore(pinecone_index=pinecone_index)
+    # Initialize PGVector vector store
+    vector_store = PGVectorStore.from_params(
+        host="localhost",
+        port=5432,
+        database="vectordb",
+        user="llama",
+        password="llama_pw",
+        table_name="resume_embeddings",
+        embed_dim=1536,
+    )
 
     # Load storage context with persisted docstore and vector store
     storage_context = StorageContext.from_defaults(
         vector_store=vector_store,
-        persist_dir="./storage"  # Must match ingestion persist_dir
+        persist_dir="./storage",  # Must match ingestion persist_dir
     )
 
     # Load index with hydrated docstore
@@ -112,7 +116,7 @@ def get_all_candidates(index: VectorStoreIndex, max_candidates: int = 25):
     # Group chunks by source_file metadata (filename)
     grouped = {}
     for node in all_nodes:
-        source = node.metadata.get("source_file", "unknown")
+        source = node.metadata.get("filename", "unknown")
         grouped.setdefault(source, []).append(
             node.get_content() if hasattr(node, "get_content") else node.text
         )
