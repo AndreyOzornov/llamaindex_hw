@@ -1,20 +1,43 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
+from typing import List, Union, Dict
+from pydantic import BaseModel, Field
+
 from llama_index.core import VectorStoreIndex, Settings, StorageContext, load_index_from_storage
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.vector_stores.postgres import PGVectorStore
+
 import json
 import re
 
 load_dotenv()
 
+# -------------------------------
+# Pydantic Models
+# -------------------------------
+
+class ResumeInfo(BaseModel):
+    name: str = Field(default="Unknown")
+    profession: str = Field(default="Unknown")
+    years_experience: Union[int, float] = Field(default=0)
+
+class Candidate(BaseModel):
+    file_name: str
+    profession: str
+    years_experience: Union[int, float]
+    resume_preview: str
+
+
+# -------------------------------
+# Load Index
+# -------------------------------
+
 @st.cache_resource(show_spinner=False)
 def get_index() -> VectorStoreIndex:
     st.info("Loading index...")
 
-    # Initialize OpenAI LLM and embeddings
     Settings.llm = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     Settings.embed_model = OpenAIEmbedding(
         model="text-embedding-3-small",
@@ -22,7 +45,6 @@ def get_index() -> VectorStoreIndex:
         api_key=os.getenv("OPENAI_API_KEY"),
     )
 
-    # Initialize PGVector vector store
     vector_store = PGVectorStore.from_params(
         host="localhost",
         port=5432,
@@ -33,20 +55,22 @@ def get_index() -> VectorStoreIndex:
         embed_dim=1536,
     )
 
-    # Load storage context with persisted docstore and vector store
     storage_context = StorageContext.from_defaults(
         vector_store=vector_store,
-        persist_dir="./storage",  # Must match ingestion persist_dir
+        persist_dir="./storage",
     )
 
-    # Load index with hydrated docstore
-    index = load_index_from_storage(storage_context)
-    return index
+    return load_index_from_storage(storage_context)
+
+
+# -------------------------------
+# LLM-based Resume Extraction
+# -------------------------------
 
 @st.cache_data(show_spinner=False)
-def cached_extract_with_llm(text: str):
+def cached_extract_with_llm(text: str) -> ResumeInfo:
     if not isinstance(text, str) or not text.strip():
-        return {"name": "Unknown", "profession": "Unknown", "years_experience": 0}
+        return ResumeInfo()
 
     prompt = f"""
 You are a helpful assistant that extracts structured information from resumes.
@@ -61,79 +85,74 @@ Resume text:
 
 Respond in JSON with keys: name, profession, years_experience. If a field is missing, use "Unknown" or 0.
 """
+
     try:
         response = Settings.llm.complete(prompt)
-        # st.write("LLM raw response:", response)  # Log raw response for debugging
 
-        # Extract the 'text' field from the response if it's a dict-like string
-        # If response is a string, try to parse as JSON first
+        # Handle response format variations
         if isinstance(response, str):
             try:
-                response_json = json.loads(response)
-                llm_text = response_json.get("text", response)
-            except Exception:
+                parsed = json.loads(response)
+                llm_text = parsed.get("text", response)
+            except json.JSONDecodeError:
                 llm_text = response
         elif isinstance(response, dict):
             llm_text = response.get("text", "")
         else:
             llm_text = str(response)
 
-        # Now parse the actual JSON string inside llm_text
+        # Extract JSON content
         try:
             data = json.loads(llm_text)
-        except Exception:
-            # Try to extract JSON substring from llm_text
-            match = re.search(r'\{.*\}', llm_text, re.DOTALL)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", llm_text, re.DOTALL)
             if match:
                 data = json.loads(match.group(0))
             else:
-                data = {"name": "Unknown", "profession": "Unknown", "years_experience": 0}
+                return ResumeInfo()
 
-        # Normalize years_experience to float
-        years_exp = data.get("years_experience", 0)
-        if isinstance(years_exp, str):
-            try:
-                years_exp = float(years_exp)
-            except Exception:
-                years_exp = 0
-        data["years_experience"] = years_exp
-
-        return data
+        return ResumeInfo(**data)
 
     except Exception as e:
         st.error(f"LLM extraction error: {e}")
-        return {"name": "Unknown", "profession": "Unknown", "years_experience": 0}
+        return ResumeInfo()
 
-def get_all_candidates(index: VectorStoreIndex, max_candidates: int = 25):
+
+# -------------------------------
+# Retrieve All Candidates
+# -------------------------------
+
+def get_all_candidates(index: VectorStoreIndex, max_candidates: int = 25) -> List[Candidate]:
     all_nodes = list(index.docstore.docs.values())
     print(f"Retrieved {len(all_nodes)} nodes from index")
 
-    # Show metadata of first few nodes for debugging
-    for node in all_nodes[:3]:
-        print("Node metadata:", node.metadata)
-        print("Node text snippet:", node.text[:200])
-
-    # Group chunks by source_file metadata (filename)
-    grouped = {}
+    grouped: Dict[str, List[str]] = {}
     for node in all_nodes:
         source = node.metadata.get("filename", "unknown")
         grouped.setdefault(source, []).append(
             node.get_content() if hasattr(node, "get_content") else node.text
         )
 
-    candidates = []
-    for source, chunk_texts in list(grouped.items())[:max_candidates]:
-        full_resume = "\n".join(chunk_texts)
-        full_resume = full_resume[:4000]  # truncate to avoid too long prompt
-        info = cached_extract_with_llm(full_resume)
-        candidates.append({
-            "Name": source,
-            "Profession": info.get("profession", "Unknown"),
-            "Years Experience": info.get("years_experience", 0),
-            "Resume Preview": full_resume  # Store the full resume text here
-        })
+    candidates: List[Candidate] = []
+
+    for source, chunks in list(grouped.items())[:max_candidates]:
+        full_resume = "\n".join(chunks)[:4000]  # Truncate to avoid too long prompts
+        extracted_info = cached_extract_with_llm(full_resume)
+
+        candidate = Candidate(
+            file_name=source,
+            profession=extracted_info.profession,
+            years_experience=extracted_info.years_experience,
+            resume_preview=full_resume,
+        )
+        candidates.append(candidate)
+
     return candidates
 
+
+# -------------------------------
+# Streamlit App
+# -------------------------------
 
 def main():
     st.title("Candidate Resumes")
@@ -143,21 +162,18 @@ def main():
 
     if not candidates:
         st.info("No candidates found in the database.")
-    else:
-        for c in candidates:
-            # Use filename as header
-            st.subheader(f"Filename: {c['Name']}")
-            st.write(f"**Profession:** {c['Profession']}")
-            st.write(f"**Years of Experience:** {c['Years Experience']}")
-            # Create an expander for detailed info
-            with st.expander("Show detailed info and summary"):
+        return
 
-                # Show full resume text or summary here
-                # Assuming you want to show more detailed text, you can add it to candidates dict
-                # For now, let's show the full resume preview text stored in 'Resume Preview'
-                st.write(c['Resume Preview'])
+    for candidate in candidates:
+        st.subheader(f"Filename: {candidate.file_name}")
+        st.write(f"**Profession:** {candidate.profession}")
+        st.write(f"**Years of Experience:** {candidate.years_experience}")
 
-            st.markdown("---")
+        with st.expander("Show detailed info and summary"):
+            st.write(candidate.resume_preview)
+
+        st.markdown("---")
+
 
 if __name__ == "__main__":
     main()
